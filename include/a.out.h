@@ -1,6 +1,7 @@
 // <a.out.h> header define the file format
 // for storing excutable programs on disk
-//
+// 
+// only the file system references this file.
 //
 
 #ifndef _AOUT_H
