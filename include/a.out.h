@@ -6,9 +6,9 @@
 #ifndef _AOUT_H
 #define _AOUT_H
 
-struct exec{
-	unsigned char 	a_magic[2];		// a.out header
-	unsigned char 	a_flags;		// magic number
+struct exec{					// a.out header
+	unsigned char 	a_magic[2];		// magic number
+	unsigned char 	a_flags;		// flags, see below
 	unsigned char 	a_cpu;			// cpu id
 	unsigned char 	a_hdrlen;		// header length
 	unsigned char 	a_unused;		// book for the future
