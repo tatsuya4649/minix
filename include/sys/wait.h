@@ -16,8 +16,11 @@
 #ifndef _WAIT_H
 #define _WAIT_H
 
-#define _LOW(v)			1		// don't wait for the child process to finish
-#define _HIGH(v)		2		// for job control : not implemention
+#define _LOW(v)			((v)&0377)
+#define _HIGH(v)		(((v)>>8)&0377)
+
+#define WNOHANG			1		// don't wait for the child process to finish
+#define WUNTRACED		2		// for job control : not implemention
 
 #define WIFEXITED(s)		(_LOW(s) == 0)				// exit normal
 #define WEXITSTATUS(s)		(_HIGH(s))				// exit status
