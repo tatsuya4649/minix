@@ -194,3 +194,286 @@ message *m_ptr;					// pointer to message buffer
 	}
 	return(OK);
 }
+/*======================================================================================*
+ * 					mini_rec					*
+ *======================================================================================*/
+PRIVATE int mini_rec(caller_ptr,src,m_ptr)
+register struct proc *caller_ptr;		// process is trying to get the message
+int src;					// which message source you need (or ANY)
+message *m_ptr;					// pointer to message buffer
+{
+	// the process or task wants to get the message. if the message is already queued,
+	// get it and unlock the sender.
+	// block the caller if a message from the desired source is unavailable.there is no
+	// need to check the validity of the parameters. user calls are always made at sendrec()
+	// and checked by mini_send() . calls from tasks such as MM and FS can be trusted.
+	register struct proc *sender_ptr;
+	register struct proc *previous_ptr;
+
+	// check if message from the desired source are already available
+	if (!(caller_ptr->p_flags & SENDING)){
+		// check caller queue
+		for (sender_ptr=caller_ptr->p_callerq;sender_ptr!=NIL_PROC;
+				previous_ptr=sender_ptr,sender_ptr=sender_ptr->p_sendlink){
+			if(src==ANY||src==proc_number(sender_ptr)){
+				// discover acceptable message
+				CopyMess(proc_number(sender_ptr),sender_ptr,sender_ptr->p_messbuf,caller_ptr,m_ptr);
+				if(sender_ptr==caller_ptr->p_callerq)
+					caller_ptr->p_callerq = sender_ptr->p_sendelink;
+				else
+					previous_ptr->p_sendlink = sender_ptr->p_sendlink;
+				if((sender_ptr->p_flagss &= ~SENDING) == 0)
+						ready(sender_ptr);	// unblock the sender
+				return (OK);
+			}	
+		}
+	}
+	// check for blocked interrupts
+	if (caller_ptr->p_int_blocked && isrxhardware(src)){
+		m_ptr->m_source = HARDWARE;
+		m_ptr->m_type = HARD_INT;
+		caller_ptr->p_int_blocked = FALSE;
+		return (OK);
+	}
+	// if no suitable message exists,block the process trying to receive it
+	caller_ptr->p_getfrom = src;
+	caller_ptr->p_messbuf = m_ptr;
+	if(caller_ptr->p_flags == 0) unready(caller_ptr);
+	caller_ptr->p_flags |= RECEIVING;
+
+	// if the MM has just blocked and there is an unannounced kernel signal,
+	// the MM can accept the message and inform the MM of it.
+	if(sig_procs > 0 && proc_number(caller_ptr) == MM_PROC_NR && src == ANY)
+		inform();
+	return(OK);
+}
+
+
+/*======================================================================================*
+ * 					pick_proc					*
+ *======================================================================================*/
+PRIVATE void pick_proc()
+{
+	// decide who should do it now. the new process is selected by setting 'proc_ptr'.
+	// if you choose a new user( or idle) process.record it in 'bill_ptr' so that
+	// the clock task decides who to charge for system time.
+	register struct proc *rp;		// process to be executed
+	
+	if( (rp=rdy_head[TASK_Q]) != NIL_PROC){
+		proc_ptr = rp;
+		return;
+	}
+	if( (rp=rdy_head[SERVER_Q]) != NIL_PROC){
+		proc_ptr = rp;
+		return;
+	}
+	if( (rp=rdy_head[USER_Q]) != NIL_PROC){
+		proc_ptr = rp;
+		bill_ptr = rp;
+		return;
+	}
+	// if none of the tasks are ready,run an idle task.
+	// to avoid this special case,the user task is always prepared creates an idle task.
+	bill_ptr = proc_ptr = proc_addr(IDLE);
+}
+
+/*======================================================================================*
+ * 					ready 						*
+ *======================================================================================*/
+PRIVATE void ready(rp)
+register struct proc *rp;			// this process is currently executable
+{
+	// add 'rp' to one of the queue of executable processes.
+	// the following three queues are prepared : 
+	// 	* TASK_Q --- (highest priority) for executable tasks
+	// 	* SERVER_Q --- (intermediate priority) for MM and FS only
+	// 	* USER_Q --- (lowest priority) for user process
+	
+	if(istaskp(rp)){
+		if (rdy_head[TASK_Q] != NIL_PROC)
+			// add to the end of a non-empty queue
+			rdy_tail[TASK_Q]->p_nextready = rp;
+		else{
+			proc_ptr = 		// run fresh task next
+			rdy_head[TASK_Q] = rp;	// add to empty queue
+		}
+		rdy_tail[TASK_Q] = rp;
+		rp->p_nextready = NIL_PROC;	// new enrey has no successor
+		return;
+	}
+	if (!isuserp(rp)){	// others are similar
+		if (rdy_head[SERVER_Q] != NIL_PROC)
+			rdy_tail[SERVER_Q]->p_nextready = rp;
+		else
+			rdy_head[SERVER_Q] = rp;
+		rdy_tail[SERVER_Q] = rp;
+		rp->p_nextready = NIL_PROC;
+		return;
+	}
+	if (rdy_head[USER_Q] != NIL_PROC)
+		rdy_tail[USER_Q] = rp;
+	rp->p_nextready = rdy_head[USER_Q];
+	rdy_head[USER_Q] = rp;
+	/*
+	if (rdy_head[USER_Q] != NIL_PROC)
+	 	rdy_tail[USER_Q]->p_nextready = rp;
+	else
+		rdy_head[USER_Q] = rp;
+	rdy_tail[USER_Q] = rp;
+	rp->p_nextready = NIL_PROC;
+	*/
+
+
+/*======================================================================================*
+ * 					unready 					*
+ *======================================================================================*/
+PRIVATE void unready(rp)
+register struct proc *rp;			// this process is no longer runnable
+{
+	// a process has blocked
+	register struct proc *xp;
+	register struct proc **qtail;		// TAKS_Q,SERVER_Q, or USER_Q rdy_tail
+
+	if (istaskp(rp)){
+		// task stack still ok?
+		if (*rp->p_stguard != STACK_GUARD)
+			panic("stack overrun by task",proc_number(rp));
+		
+		if ((xp = rdy_head[TASK_Q]) == NIL_PROC) return;
+		if (xp == rp){
+			// remove head of queue
+			rdy_head[TASK_Q] = xp->p_nextready;
+			if(rp == proc_ptr) pick_proc();
+		}
+		qtail = &rdy_tail[TASK_Q];
+	}
+	else if (!isuserp(rp)){
+		if((xp=rdy_head[SERVER_Q]) == NIL_PROC) return;
+		if(xp==rp){
+			rdy_head[SERVER_Q] = xp->p_nextready;
+			pick_proc();
+			return;
+		}
+		qtail = &rdy_tail[SERVER_Q];
+	}else
+	{
+		if ((xp = rdy_head[USER_Q]) == NIL_PROC) return;
+		if (xp == rp){
+			rdy_head[USER_Q] = xp->p_nextready;
+			pick_proc();
+			return;
+		}
+		qtail = &rdy_tail[USER_Q];
+	}
+
+	// serarch body of queue. A process can be made unready even if it is
+	// not running by being sent a signal that kills it.
+	while(xp->p_nextready != rp)
+		if ((xp=xp->p_nextready) == NIL_PROC) return;
+	xp->p_nextready = xp->p_nextready->p_nextready;
+	if (*qtail == rp) *qtail = xp;
+
+/*======================================================================================*
+ * 					sched	 					*
+ *======================================================================================*/
+PRIVATE void sched()
+{
+	// the current process has run too long.if another low priority (user) process is
+	// runnable,put the current process on the end of the user queue,
+	// possible promoting another user to head of the queue.
+	if (rdy_head[USER_Q] == NIL_PROC) return;
+
+	// one or more user process queued
+	rdy_tail[USER_Q]->p_nextready = rdy_head[USER_Q];
+	rdy_tail[USER_Q] = rdy_head[USER_Q];
+	rdy_tail[USER_Q] = rdy_head[USER_Q]->p_nextready;
+	rdy_tail[USER_Q]->p_nextready = NIL_PROC;
+	pick_proc();
+}
+
+/*======================================================================================*
+ * 					lock_mini_send					*
+ *======================================================================================*/
+PUBLIC int lock_mini_send(caller_ptr,dest,m_ptr)
+struct proc *caller_ptr;		// who is trying to send a message?
+int dest;				// to whom is message being sent?
+message *m_ptr;				// pointer to message buffer
+{
+	// safe gateway to mini_send() for tasks.
+	int result;
+
+	switching = TRUE;
+	result = mini_send(caller_ptr,dest,m_ptr);
+	switching = FALASE;
+	return (result);
+}
+
+/*======================================================================================*
+ * 					lock_pick_proc					*
+ *======================================================================================*/
+PUBLIC void lock_pick_proc()
+{
+	// safe gateway to pick_proc() for tasks.
+	switching = TRUE;
+	pick_proc();
+	switching = FALSE;
+}
+
+/*======================================================================================*
+ * 					lock_ready					*
+ *======================================================================================*/
+PUBLIC void lock_ready(rp)
+struct proc *rp;			// this process is now runnable
+{
+	// sage gateway to ready() for tasks.
+	switching = TRUE;
+      	ready(rp);
+	switching = FALSE;
+}
+
+
+/*======================================================================================*
+ * 					lock_unready					*
+ *======================================================================================*/
+PUBLIC void lock_unready(rp)
+struct proc *rp;			// this process is no longer runnable
+{
+	// sage gateway to unready() for tasks.
+	switching = TRUE;
+	unready(rp);
+	switching = FALSE;
+}
+
+/*======================================================================================*
+ * 					lock_sched					*
+ *======================================================================================*/
+PUBLIC void lock_sched()
+{
+	// safe gateway to sched() for tasks.
+	switching = TRUE;
+	sched();
+	switching = FALSE;
+}
+
+/*======================================================================================*
+ * 					unhold						*
+ *======================================================================================*/
+PUBLIC	void unhold()
+{
+	// flush any held-up interrupts.k_reenter must be 0.held_head must not be NIL_PROC.
+	// interrupts must be disabled.they will be enabled but will be disabled when
+	// this returns.
+	register struct proc *rp;		// current head of held queue
+
+	if (switching) return;
+	re = held_head;
+	do{
+		if ((held_head = rp->p_nextheld)==NIL_PROC) held_tail = NIL_PROC;
+		rp->p_int_held = FALSE;
+		unlock();			// reduce latency; held queue may change
+		interrupt(proc_number(rp));
+		lock();				// protect the held queue again
+	}
+	while( (rp=held_head) != NIL_PROC);
+}
+
