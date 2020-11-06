@@ -100,7 +100,7 @@ int task;				// number of tasks started
  *======================================================================================*/
 PUBLIC int sys_call(function,src_dest,m_ptr)
 int function;				// SEND,RECEIVEE,or both
-int src_dest;				// source of sending of source of receiving
+int src_dest;				// source of sending or source of receiving
 message *m_ptr;				// pointer to the message
 {
 	// the only system call in minix is sending and receiving message.
@@ -125,7 +125,7 @@ message *m_ptr;				// pointer to the message
 
 	// function = RECEIVE or BOTH
 	return (mini_rec(rp,src_dest,m_ptr));
-
+}
 
 /*======================================================================================*
  * 					mini_send					*
@@ -372,6 +372,7 @@ register struct proc *rp;			// this process is no longer runnable
 		if ((xp=xp->p_nextready) == NIL_PROC) return;
 	xp->p_nextready = xp->p_nextready->p_nextready;
 	if (*qtail == rp) *qtail = xp;
+}
 
 /*======================================================================================*
  * 					sched	 					*
