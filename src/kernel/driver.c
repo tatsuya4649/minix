@@ -141,3 +141,137 @@ message *m_ptr;				// pointer to read or write message
 	r = ioreq.io_nbytes;
 	return (r<0 ? r : m_ptr->COUNT - r);
 }
+/*======================================================================================*
+ * 					do_vrdwt 					*
+ *======================================================================================*/
+PUBLIC int do_vrdwt(dp,m_ptr)
+struct driver *dp;			// device dependent entry point
+message *m_ptr;				// pointer to read or write message
+{
+	// fetch the vector of I/O requests. process one by one and return status to vector
+	
+	struct iorequest *iop;
+	static struct iorequest_s iovec[NR_IOREQS];
+	phys_bytes iovec_phys;
+	unsigned nr_requests;
+	int request;
+	int r;
+	phys_bytes user_iovec_phys;
+
+	nr_requests = m_ptr->COUNT;
+
+	if (nr_requests > sizeof iovec/ sizeof iovec[0])
+		panic("FS passed too big an I/O vector", nr_requests);
+
+	iovec_phys = vir2phys(iovec);
+	user_iovec_phys = numap(m_ptr->PROC_NR, (vir_bytes) m_ptr->ADDRESS,
+			(vir_bytes) (nr_requests * sizeof iovec[0]));
+
+	if (user_iovec_phys == 0)
+		panic("FS passed a bad I/O vector",(int) m_ptr->ADDRESS);
+
+	phys_copy(user_iovec_phys,iovec_phys,(phys_bytes) nr_requests * sizeof iovec[0]);
+
+	if ((*dp->dr_prepare)(m_ptr->DEVICE) == NIL_DEV) return (ENXIO);
+
+	for (request=0,iop=iovec;request<nr_requests;request++,iop++){
+		if ((r = (*dp->dr_schedule)(m_ptr->PROC_NR, iop)) != OK) break;
+	}
+
+	if (r == OK) (void)(*dp->dr_finish)();
+
+	phys_copy(iovec_phys,user_iovec_phys,
+			(phys_bytes) nr_requests * sizeof iovec[0]);
+	return (OK);
+}
+/*======================================================================================*
+ * 					no_name 					*
+ *======================================================================================*/
+PUBLIC char *no_name()
+{
+	// if no specific name for the device
+	return (tasktab[proc_number(proc_ptr) + NR_TASKS].name);
+}
+/*======================================================================================*
+ * 					do_nop	 					*
+ *======================================================================================*/
+PUBLIC int do_nop(dp,m_ptr)
+struct driver *dp;
+message *m_ptr;
+{
+	// nothing there, or nothing to do
+	switch(m_ptr->m_type){
+		case DEV_OPEN:		return (ENODEV);
+		case DEV_CLOSE:		return (OK);
+		case DEV_IOCTL:		return (ENOTTY);
+		default:		return (EIO);
+	}
+}
+/*======================================================================================*
+ * 					nop_finish 					*
+ *======================================================================================*/
+PUBLIC int nop_finish()
+{
+	// there is nothing to finish, all work is done by dp->dr_schedule
+	return (OK);
+}
+
+/*======================================================================================*
+ * 					nop_cleanup 					*
+ *======================================================================================*/
+PUBLIC void nop_cleanup()
+{
+	// nothing to clean up
+}
+/*======================================================================================*
+ * 					clock_mess					*
+ *======================================================================================*/
+PUBLIC void clock_mess(ticks,func)
+int ticks;				// how many clocks to wait
+watchdog_t func;			// function to call when timeout
+{
+	// send messeage oto clock task
+	message mess;
+
+	mess.m_type = SET_ALARM;
+	mess.CLOCK_PROC_NR = proc_number(proc_ptr);
+	mess.DELTA_TICKS = (long) ticks;
+	mess.FUNC_TO_CALL = (sighandler_t) func;
+	sendrec(CLOCK,&mess);
+}
+/*======================================================================================*
+ * 					do_diocntl					*
+ *======================================================================================*/
+PUBLIC int do_diocntl(dp,m_ptr)
+struct driver *dp;
+message *m_ptr;				// ioctl pointer to the request
+{
+	// carry out a partition setting/getting request.
+	struct device *dv;
+	phys_bytes user_phys,entry_phys;
+	struct partition entry;
+
+	if (m_ptr->REQUEST != DIOCSETP && m_ptr->REQUSEST != DIOCGETP) return (ENOTTY);
+
+	// decode the message parameters
+	if ((dv = (*dp->dor_prepare)(m_ptr->DEVICE)) == NIL_DEV) return (ENXIO);
+
+	user_phys = numap(m_ptr->PROC_NR,(vir_bytes) m_ptr->ADDRESS,sizeof(entry));
+	if (user_phys == 0) return (EFAULT);
+
+	entry_phys = vir2phys(&entry);
+
+	if (m_ptr->REQUEST == DIOCSETP){
+		// copy just this one partition table entry
+		phys_copy(user_phys,entry_phys,(phys_bytes) sizeof(entry));
+		dv->dv_base = entry.base;
+		dv->dv_size = entry.size;
+	} else {
+		// return a partition table entry and the geometry of the device
+		entry.base = dv->dv_base;
+		entry.size = dv->dv_size;
+		(*dp->dr_geometry)(&entry);
+		phys_copy(entry_phys,user_phys,(phys_bytes) sizeof(entry));
+	}
+	return (OK);
+}
