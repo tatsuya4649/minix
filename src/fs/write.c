@@ -102,3 +102,97 @@ zone_t new_zone;
 /*======================================================*
  *			wr_indir			*
  *======================================================*/
+PRIVATE void wr_indir(bp,index,zone)
+struct buf *bp;
+int index;
+zone_t zone;
+{
+	struct super_block *sp;
+
+	sp = get_super(bp->b_dev);
+	if (sp->s_version == V1)
+		bp->b_v1_ind[index] = (zone1_t) conv2(sp->s_native,(int) zone);
+	else
+		bp->b_v2_ind[index] = (zone1_t) conv4(sp->s_native,(long) zone);
+}
+
+/*======================================================*
+ *			clear_zone			*
+ *======================================================*/
+PUBLIC void clear_zone(rip,pos,flag)
+register struct inode *rip;
+off_t pos;
+int flag;
+{
+	register struct buf *bp;
+	register block_t b,blo,bhi;
+	register off_t next;
+	register int scale;
+	register zone_t zone_size;
+
+	scale = rip->i_sp->s_log_zone_size;
+	if (scale == 0) return;
+
+	zone_size = (zone_t) BLOCK_SIZE << scale;
+	if (flag == 1) pos = (pos/zone_size) * zone_size;
+	next = pos + BLOCK_SIZE - 1;
+
+	if (next/zone_size != pos/zone_size) return;
+	if ((blo = read_map(rip,next)) == NO_BLOCK) return;
+	bhi = (((blo>>scale)+1) << scale) - 1;
+
+	for (b=blo;b<=bhi;b++){
+		bp = get_block(rip->i_dev,b,NO_READ);
+		zero_block(bp);
+		put_block(bp,FULL_DATA_BLOCK);
+	}
+}
+
+/*======================================================*
+ *			new_block			*
+ *======================================================*/
+PUBLIC struct buf *new_block(rip,position)
+register struct inode *rip;
+off_t position;
+{
+	register struct buf *bp;
+	block_t b,base_block;
+	zone_t z;
+	zone_t zone_size;
+	int scale,r;
+	struct super_block *sp;
+
+	if ((b=read_map(rip,position)) == NO_BLOCK){
+		if (rip->i_zone[0] == NO_ZONE){
+			sp = rip->i_sp;
+			z = sp->s_firstdatazone;
+		}else{
+			z = rip->i_zone[0];
+		}
+		if ((z = alloc_zone(rip->i_dev,z)) == NO_ZONE) return (NIL_BUF);
+		if ((r = write_map(rip,position,z)) != OK){
+			free_zone(rip->i_dev,z);
+			err_code = r;
+			return (NIL_BUF);
+		}
+		
+		if (position != rip->i_size) clear_zone(rip,position,1);
+		scale = rip->i_sp->s_log_zone_size;
+		base_block = (block_t) z << scale;
+		zone_size = (zone_t) BLOCK_SIZE << scale;
+		b = base_block + (block_t) ((position % zone_size)/BLOCK_SIZE);
+	}
+	bp = get_block(rip->i_dev,b,NO_READ);
+	zero_block(bp);
+	return (bp);
+}
+
+/*======================================================*
+ *			zero_block			*
+ *======================================================*/
+PUBLIC void zero_block(bp)
+register struct buf *bp;
+{
+	memset(bp->b_data,0,BLOCK_SIZE);
+	bp->b_dirt = DIRTY;
+}
